@@ -1,0 +1,77 @@
+---
+# ============================================================
+#  Rol: dhcpd — instala y configura dhcp-server en Rocky 9
+# ============================================================
+
+- name: Instalar paquetes DHCP
+  ansible.builtin.package:
+    name: "{{ dhcp_packages }}"
+    state: present
+
+# ---------- Detectar interfaz de red (si dhcp_interface='auto') ----------
+# Se usa el nombre de la interfaz desde ansible_facts cuando es 'auto'.
+# En producción define dhcp_interface explícitamente en group_vars.
+- name: Determinar interfaz DHCP automáticamente (solo si dhcp_interface=auto)
+  ansible.builtin.set_fact:
+    dhcp_iface_resolved: >-
+      {{
+        ansible_default_ipv4.interface
+        if dhcp_interface == 'auto'
+        else dhcp_interface
+      }}
+
+# ---------- Configurar interfaz en sysconfig de dhcpd ----------
+- name: Configurar interfaz de escucha en /etc/sysconfig/dhcpd
+  ansible.builtin.lineinfile:
+    path:   /etc/sysconfig/dhcpd
+    regexp: '^DHCPDARGS='
+    line:   'DHCPDARGS="{{ dhcp_iface_resolved }}"'
+    create: true
+    owner:  root
+    group:  root
+    mode:   "0644"
+  notify: restart dhcpd
+
+# ---------- dhcpd.conf ----------
+- name: Validar configuración DHCP antes de desplegar
+  ansible.builtin.template:
+    src:  dhcpd.conf.j2
+    dest: /tmp/dhcpd.conf.test
+    mode: "0600"
+  changed_when: false
+
+- name: Verificar sintaxis dhcpd.conf (dhcpd -t)
+  ansible.builtin.command:
+    cmd: /usr/sbin/dhcpd -t -cf /tmp/dhcpd.conf.test
+  changed_when: false
+  register: dhcpd_syntax_check
+
+- name: Desplegar dhcpd.conf validado
+  ansible.builtin.template:
+    src:   dhcpd.conf.j2
+    dest:  "{{ dhcp_conf_file }}"
+    owner: root
+    group: root
+    mode:  "0644"
+  notify: restart dhcpd
+
+- name: Limpiar archivo de prueba
+  ansible.builtin.file:
+    path:  /tmp/dhcpd.conf.test
+    state: absent
+  changed_when: false
+
+# ---------- Firewall ----------
+- name: Abrir puerto DHCP (UDP 67) en firewalld
+  ansible.posix.firewalld:
+    service:   dhcp
+    permanent: true
+    state:     enabled
+    immediate: true
+
+# ---------- Servicio ----------
+- name: Habilitar e iniciar dhcpd
+  ansible.builtin.service:
+    name:    "{{ dhcp_service }}"
+    enabled: true
+    state:   started

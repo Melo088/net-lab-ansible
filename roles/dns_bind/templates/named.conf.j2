@@ -1,0 +1,49 @@
+// named.conf — generado por Ansible (no editar manualmente)
+
+options {
+    listen-on port 53 { {% for ip in bind_listen_on %}{{ ip }}; {% endfor %}};
+    listen-on-v6 port 53 { ::1; };
+    directory       "/var/named";
+    dump-file       "/var/named/data/cache_dump.db";
+    statistics-file "/var/named/data/named_stats.txt";
+    memstatistics-file "/var/named/data/named_mem_stats.txt";
+
+    recursion {{ bind_recursion }};
+
+    allow-query { {% for q in bind_allow_query %}{{ q }}; {% endfor %}};
+
+{% if bind_forwarders is defined and bind_forwarders | length > 0 %}
+    forwarders {
+{% for f in bind_forwarders %}
+        {{ f }};
+{% endfor %}
+    };
+    forward only;
+{% endif %}
+
+    dnssec-validation yes;
+};
+
+logging {
+    channel default_debug {
+        file "data/named.run";
+        severity dynamic;
+    };
+};
+
+// Zona forward
+zone "{{ lab_domain }}" IN {
+    type master;
+    file "{{ lab_domain }}.zone";
+    allow-update { none; };
+};
+
+// Zona reverse
+zone "{{ lab_reverse_zone }}" IN {
+    type master;
+    file "{{ lab_reverse_zone }}.zone";
+    allow-update { none; };
+};
+
+include "/etc/named.rfc1912.zones";
+include "/etc/named.root.key";

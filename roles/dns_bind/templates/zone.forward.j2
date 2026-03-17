@@ -1,0 +1,17 @@
+; Zona forward: {{ lab_domain }}
+; Generada por Ansible — no editar manualmente
+$TTL 86400
+@   IN  SOA  {{ dns_server_fqdn }}. admin.{{ lab_domain }}. (
+              {{ bind_zone_serial }} ; Serial
+              3600                  ; Refresh
+              900                   ; Retry
+              604800                ; Expire
+              86400 )               ; Minimum TTL
+
+; Name servers
+@       IN  NS   {{ dns_server_fqdn }}.
+
+; Registros A
+{% for record in bind_a_records %}
+{{ "%-16s" | format(record.name) }} IN  A    {{ record.ip }}
+{% endfor %}

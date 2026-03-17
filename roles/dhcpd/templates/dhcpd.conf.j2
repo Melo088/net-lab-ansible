@@ -1,0 +1,28 @@
+# dhcpd.conf — generado por Ansible (no editar manualmente)
+
+authoritative;
+
+option domain-name "{{ dhcp_domain_name }}";
+option domain-name-servers {% for s in dhcp_domain_servers %}{{ s }}{% if not loop.last %}, {% endif %}{% endfor %};
+
+default-lease-time {{ dhcp_default_lease }};
+max-lease-time     {{ dhcp_max_lease }};
+
+# Subred principal
+subnet {{ lab_network }} netmask {{ lab_netmask }} {
+    range {{ dhcp_range_start }} {{ dhcp_range_end }};
+    option routers          {{ lab_gateway }};
+    option broadcast-address {{ lab_broadcast }};
+    option subnet-mask      {{ lab_netmask }};
+}
+
+{% if dhcp_reservations is defined and dhcp_reservations | length > 0 %}
+# Reservas (host fijos por MAC)
+{% for r in dhcp_reservations %}
+host {{ r.hostname }} {
+    hardware ethernet {{ r.mac }};
+    fixed-address     {{ r.ip }};
+    option host-name  "{{ r.hostname }}";
+}
+{% endfor %}
+{% endif %}

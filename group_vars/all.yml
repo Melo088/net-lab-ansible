@@ -1,0 +1,79 @@
+---
+# ============================================================
+#  group_vars/all.yml — Variables globales del laboratorio
+# ============================================================
+
+# ----- Red general -----
+lab_domain:       "jmelol.lab"
+lab_network:      "192.168.50.0"
+lab_netmask:      "255.255.255.0"
+lab_prefix:       "24"
+lab_gateway:      "192.168.50.1"
+lab_broadcast:    "192.168.50.255"
+lab_reverse_zone: "50.168.192.in-addr.arpa"
+
+# ----- Servidor DNS/DHCP -----
+dns_server_ip:       "192.168.50.10"
+dns_server_hostname: "ns1"
+dns_server_fqdn:     "ns1.jmelol.lab"
+
+# ----- DNS – BIND -----
+bind_listen_on:
+  - "127.0.0.1"
+  - "{{ dns_server_ip }}"
+
+bind_allow_query:
+  - "localhost"
+  - "{{ lab_network }}/{{ lab_prefix }}"
+
+bind_recursion: "yes"
+
+bind_forwarders:
+  - "8.8.8.8"
+  - "1.1.1.1"
+
+# Serial de zona: se recomienda actualizar al cambiar registros
+# Formato YYYYMMDDnn — el playbook lo toma como string
+bind_zone_serial: "2025031701"
+
+# Registros A de la zona forward (nombre relativo al dominio)
+# ip, name, ptr (si debe generar PTR automático)
+bind_a_records:
+  - { name: "ns1",     ip: "192.168.50.10" }
+  - { name: "master",  ip: "192.168.50.20" }
+  - { name: "worker",  ip: "192.168.50.21" }
+  - { name: "client01",ip: "192.168.50.100" }
+
+# Registros PTR adicionales (último octeto → nombre FQDN con punto final)
+bind_ptr_records:
+  - { octet: "10",  fqdn: "ns1.jmelol.lab." }
+  - { octet: "20",  fqdn: "master.jmelol.lab." }
+  - { octet: "21",  fqdn: "worker.jmelol.lab." }
+  - { octet: "100", fqdn: "client01.jmelol.lab." }
+
+# ----- DHCP – dhcpd -----
+# Interfaz de escucha 
+dhcp_interface: "enp1s0"
+
+dhcp_domain_name:    "jmelol.lab"
+dhcp_domain_servers:
+  - "192.168.50.10"
+
+dhcp_default_lease:  43200   # 12 h
+dhcp_max_lease:      86400   # 24 h
+
+dhcp_range_start: "192.168.50.100"
+dhcp_range_end:   "192.168.50.200"
+
+# Reservas por MAC para nodos Kubernetes y cliente fijo
+
+dhcp_reservations:
+#  - hostname: "master"
+#    mac:  "52:54:00:AA:BB:20"
+#    ip:   "192.168.50.20"
+#  - hostname: "worker"
+#    mac:  "52:54:00:AA:BB:21"
+#    ip:   "192.168.50.21"
+  - hostname: "client01"
+    mac:  "52:54:00:2a:6a:bd"
+    ip:   "192.168.50.100"

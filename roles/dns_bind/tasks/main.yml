@@ -1,0 +1,76 @@
+---
+# ============================================================
+#  Rol: dns_bind — instala y configura BIND/named en Rocky 9
+# ============================================================
+
+- name: Instalar paquetes BIND
+  ansible.builtin.package:
+    name: "{{ bind_packages }}"
+    state: present
+
+# ---------- named.conf ----------
+- name: Desplegar named.conf
+  ansible.builtin.template:
+    src:   named.conf.j2
+    dest:  "{{ bind_conf_file }}"
+    owner: root
+    group: "{{ bind_group }}"
+    mode:  "0640"
+    validate: "/usr/sbin/named-checkconf %s"
+  notify: restart named
+
+# ---------- Zona forward ----------
+- name: Desplegar zona forward
+  ansible.builtin.template:
+    src:   zone.forward.j2
+    dest:  "{{ bind_zones_dir }}/{{ lab_domain }}.zone"
+    owner: "{{ bind_user }}"
+    group: "{{ bind_group }}"
+    mode:  "0640"
+  notify: reload named
+
+- name: Validar zona forward
+  ansible.builtin.command:
+    cmd: >
+      /usr/sbin/named-checkzone {{ lab_domain }}
+      {{ bind_zones_dir }}/{{ lab_domain }}.zone
+  changed_when: false
+
+# ---------- Zona reverse ----------
+- name: Desplegar zona reverse
+  ansible.builtin.template:
+    src:   zone.reverse.j2
+    dest:  "{{ bind_zones_dir }}/{{ lab_reverse_zone }}.zone"
+    owner: "{{ bind_user }}"
+    group: "{{ bind_group }}"
+    mode:  "0640"
+  notify: reload named
+
+- name: Validar zona reverse
+  ansible.builtin.command:
+    cmd: >
+      /usr/sbin/named-checkzone {{ lab_reverse_zone }}
+      {{ bind_zones_dir }}/{{ lab_reverse_zone }}.zone
+  changed_when: false
+
+# ---------- Firewall ----------
+- name: Abrir puerto DNS (TCP/UDP 53) en firewalld
+  ansible.posix.firewalld:
+    service: dns
+    permanent: true
+    state: enabled
+    immediate: true
+
+# ---------- SELinux ----------
+- name: Permitir que named escuche en todos los puertos (si se necesita puerto no estándar)
+  ansible.builtin.command:
+    cmd: setsebool -P named_tcp_bind_http_port 0
+  changed_when: false
+  # named ya tiene el contexto correcto para /var/named y /etc/named.conf
+
+# ---------- Servicio ----------
+- name: Habilitar e iniciar named
+  ansible.builtin.service:
+    name:    "{{ bind_service }}"
+    enabled: true
+    state:   started

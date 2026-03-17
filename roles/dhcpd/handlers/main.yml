@@ -1,0 +1,5 @@
+---
+- name: restart dhcpd
+  ansible.builtin.service:
+    name: "{{ dhcp_service }}"
+    state: restarted

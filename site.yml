@@ -1,0 +1,16 @@
+---
+# ============================================================
+#  site.yml — Playbook principal del laboratorio
+# ============================================================
+- name: Configurar servidor DNS y DHCP
+  hosts: dns_dhcp_servers
+  gather_facts: true
+  roles:
+    - dns_bind
+    - dhcpd
+
+# agregar aquí futuros plays para k8s_master / k8s_workers
+# - name: Preparar nodos Kubernetes
+#   hosts: k8s_master:k8s_workers
+#   roles:
+#     - k8s_base

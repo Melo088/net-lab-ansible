@@ -1,0 +1,17 @@
+; Zona reverse: {{ lab_reverse_zone }}
+; Generada por Ansible — no editar manualmente
+$TTL 86400
+@   IN  SOA  {{ dns_server_fqdn }}. admin.{{ lab_domain }}. (
+              {{ bind_zone_serial }} ; Serial
+              3600                  ; Refresh
+              900                   ; Retry
+              604800                ; Expire
+              86400 )               ; Minimum TTL
+
+; Name servers
+@       IN  NS   {{ dns_server_fqdn }}.
+
+; Registros PTR
+{% for record in bind_ptr_records %}
+{{ "%-8s" | format(record.octet) }} IN  PTR  {{ record.fqdn }}
+{% endfor %}
