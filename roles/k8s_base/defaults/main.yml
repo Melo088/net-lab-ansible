@@ -1,0 +1,24 @@
+---
+# ============================================================
+#  Rol: k8s_base — defaults
+#  Aplica a: k8s_master y k8s_workers
+# ============================================================
+
+# Versión de Kubernetes (repo pkgs.k8s.io)
+k8s_version_major_minor: "1.32"
+
+# CIDR de pods para Flannel — NO cambiar salvo que se use otro CNI
+k8s_pod_cidr: "10.244.0.0/16"
+
+# Runtime socket
+k8s_cri_socket: "unix:///run/containerd/containerd.sock"
+
+# Paquetes de Kubernetes a instalar
+k8s_packages:
+  - kubelet
+  - kubeadm
+  - kubectl
+
+# Paquetes de containerd (vía repo Docker)
+containerd_packages:
+  - containerd.io

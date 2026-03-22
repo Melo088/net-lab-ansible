@@ -1,0 +1,124 @@
+---
+# ============================================================
+#  Rol: k8s_master — inicializa el control plane con kubeadm
+# ============================================================
+
+# ---------- 1. Firewall del control plane ----------
+- name: Abrir puertos del control plane
+  ansible.posix.firewalld:
+    port: "{{ item }}"
+    permanent: true
+    state: enabled
+    immediate: true
+  loop:
+    - "6443/tcp"        # kube-apiserver
+    - "2379-2380/tcp"   # etcd
+    - "10250/tcp"       # kubelet
+    - "10259/tcp"       # kube-scheduler
+    - "10257/tcp"       # kube-controller-manager
+
+# ---------- 2. Verificar si el cluster ya existe ----------
+- name: Verificar si kubeadm ya inicializó el cluster
+  ansible.builtin.stat:
+    path: /etc/kubernetes/admin.conf
+  register: kubeadm_initialized
+
+# ---------- 3. Limpiar estado parcial si kubeadm falló antes ----------
+# Si admin.conf no existe pero sí hay estado residual (etcd, kubelet config),
+# kubeadm reset lo limpia sin afectar una instalación exitosa.
+- name: Limpiar estado parcial de kubeadm (reset previo a init)
+  ansible.builtin.command:
+    cmd: kubeadm reset --force
+  when: not kubeadm_initialized.stat.exists
+  changed_when: true
+  failed_when: false  
+
+# ---------- 4. Inicializar cluster ----------
+- name: Inicializar cluster con kubeadm
+  ansible.builtin.command:
+    cmd: >
+      kubeadm init
+      --apiserver-advertise-address={{ k8s_master_ip }}
+      --pod-network-cidr={{ k8s_pod_cidr }}
+      --cri-socket={{ k8s_cri_socket }}
+  when: not kubeadm_initialized.stat.exists
+  register: kubeadm_init_result
+  changed_when: true
+
+- name: Mostrar output de kubeadm init (contiene el join command)
+  ansible.builtin.debug:
+    msg: "{{ kubeadm_init_result.stdout_lines }}"
+  when: not kubeadm_initialized.stat.exists and kubeadm_init_result is defined
+
+# ---------- 5. Configurar kubectl para el usuario rocky ----------
+- name: Crear directorio .kube para {{ k8s_kubeconfig_user }}
+  ansible.builtin.file:
+    path: "{{ k8s_kubeconfig_dir }}"
+    state: directory
+    owner: "{{ k8s_kubeconfig_user }}"
+    group: "{{ k8s_kubeconfig_user }}"
+    mode: "0755"
+
+- name: Copiar admin.conf a ~/.kube/config
+  ansible.builtin.copy:
+    src: /etc/kubernetes/admin.conf
+    dest: "{{ k8s_kubeconfig_dir }}/config"
+    remote_src: true
+    owner: "{{ k8s_kubeconfig_user }}"
+    group: "{{ k8s_kubeconfig_user }}"
+    mode: "0600"
+
+# ---------- 6. Esperar a que la API de Kubernetes responda ----------
+- name: Esperar a que kube-apiserver esté disponible
+  ansible.builtin.wait_for:
+    host: "{{ k8s_master_ip }}"
+    port: 6443
+    state: started
+    timeout: 120
+
+# ---------- 7. Instalar CNI Flannel ----------
+- name: Verificar si Flannel ya está desplegado
+  ansible.builtin.command:
+    cmd: kubectl get daemonset -n kube-flannel kube-flannel-ds
+  environment:
+    KUBECONFIG: "{{ k8s_kubeconfig_dir }}/config"
+  register: flannel_check
+  failed_when: false
+  changed_when: false
+  become: false
+
+- name: Aplicar manifiesto de Flannel CNI
+  ansible.builtin.command:
+    cmd: kubectl apply -f {{ k8s_flannel_manifest }}
+  environment:
+    KUBECONFIG: "{{ k8s_kubeconfig_dir }}/config"
+  when: flannel_check.rc != 0
+  become: false
+  changed_when: true
+
+# ---------- 8. Obtener join command para los workers ----------
+- name: Generar token de join (válido 24h)
+  ansible.builtin.command:
+    cmd: kubeadm token create --print-join-command
+  register: k8s_join_command_raw
+  changed_when: false
+
+- name: Guardar join command como fact accesible por workers
+  ansible.builtin.set_fact:
+    k8s_join_command: "{{ k8s_join_command_raw.stdout }}"
+
+- name: Guardar join command en /tmp como backup legible
+  ansible.builtin.copy:
+    content: "{{ k8s_join_command_raw.stdout }}\n"
+    dest: /tmp/k8s-join-command.sh
+    mode: "0600"
+
+# ---------- 9. Compartir kubeconfig con el bastion (ns1) ----------
+- name: Leer admin.conf para copiarlo al bastion
+  ansible.builtin.slurp:
+    src: /etc/kubernetes/admin.conf
+  register: master_kubeconfig_b64
+
+- name: Guardar kubeconfig como fact compartido
+  ansible.builtin.set_fact:
+    master_kubeconfig_content: "{{ master_kubeconfig_b64.content | b64decode }}"

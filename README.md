@@ -1,7 +1,37 @@
-# lab1-ansible-dns-dhcp
+# net-lab-ansible
 
-Idempotent Ansible playbook to install and configure **BIND (named)** and **dhcpd** on Rocky Linux 9.  
-Built as a network infrastructure lab on KVM/Fedora, designed to serve as the foundation for a future Kubernetes cluster.
+Idempotent Ansible playbook suite to deploy a complete network infrastructure lab on KVM/Fedora:
+**DNS + DHCP (BIND/dhcpd)** and a full **Kubernetes 1.32 cluster** (kubeadm + Flannel CNI) on Rocky Linux 9.
+
+---
+
+## Architecture
+
+```
+192.168.50.0/24  (lab1-ansible-net / KVM NAT)
+│
+├── 192.168.50.1    virbr50 — KVM gateway (libvirt)
+├── 192.168.50.10   ns1.jmelol.lab      ← Bastion: DNS + DHCP + kubectl  [active]
+├── 192.168.50.20   master.jmelol.lab   ← Kubernetes control plane        [active]
+├── 192.168.50.21   worker.jmelol.lab   ← Kubernetes worker / workloads   [active]
+└── 192.168.50.100  client01.jmelol.lab ← Test DHCP client (fixed MAC)    [optional]
+     (dynamic pool: 192.168.50.150–200)
+```
+
+---
+
+## Development Environment
+
+| Component    | Details                                          |
+|---|---|
+| Host OS      | Fedora 43 (KDE Plasma) — kernel 6.19.7           |
+| Hardware     | Lenovo IdeaPad Slim 3 15AMN8                     |
+| Hypervisor   | KVM/QEMU + libvirt (`dnf install @virtualization`)|
+| Guest OS     | Rocky Linux 9.7 (Blue Onyx) Minimal              |
+| Kubernetes   | 1.32.13                                          |
+| Runtime      | containerd 2.2.2                                 |
+| CNI          | Flannel (latest)                                 |
+| Ansible      | Installed in an isolated `.venv`                 |
 
 ---
 
@@ -16,7 +46,7 @@ lab1-ansible-dns-dhcp/
 │   └── all.yml
 ├── site.yml
 ├── roles/
-│   ├── dns_bind/
+│   ├── dns_bind/               ← BIND (named) on ns1
 │   │   ├── defaults/main.yml
 │   │   ├── handlers/main.yml
 │   │   ├── tasks/main.yml
@@ -24,12 +54,27 @@ lab1-ansible-dns-dhcp/
 │   │       ├── named.conf.j2
 │   │       ├── zone.forward.j2
 │   │       └── zone.reverse.j2
-│   └── dhcpd/
+│   ├── dhcpd/                  ← ISC dhcpd on ns1
+│   │   ├── defaults/main.yml
+│   │   ├── handlers/main.yml
+│   │   ├── tasks/main.yml
+│   │   └── templates/
+│   │       └── dhcpd.conf.j2
+│   ├── k8s_base/               ← Common k8s prerequisites (all nodes)
+│   │   ├── defaults/main.yml
+│   │   ├── handlers/main.yml
+│   │   └── tasks/main.yml
+│   ├── k8s_master/             ← kubeadm init + Flannel CNI
+│   │   ├── defaults/main.yml
+│   │   └── tasks/main.yml
+│   ├── k8s_worker/             ← kubeadm join
+│   │   ├── defaults/main.yml
+│   │   └── tasks/main.yml
+│   └── k8s_kubectl_bastion/    ← kubectl + kubeconfig on ns1
 │       ├── defaults/main.yml
-│       ├── handlers/main.yml
-│       ├── tasks/main.yml
-│       └── templates/
-│           └── dhcpd.conf.j2
+│       └── tasks/main.yml
+├── startup-guide.txt           ← Lab1 (DNS/DHCP) startup & verification
+├── startup-guide-k8s.txt       ← Lab2 (Kubernetes) startup & verification
 ├── .gitignore
 ├── .github/workflows/ci.yml
 └── README.md
@@ -37,273 +82,97 @@ lab1-ansible-dns-dhcp/
 
 ---
 
-## Development Environment
+## Playbook Plays (site.yml)
 
-| Component | Details |
-|---|---|
-| Host OS | Fedora 43 (KDE Plasma) — kernel 6.19.7 |
-| Hardware | Lenovo IdeaPad Slim 3 15AMN8 |
-| Hypervisor | KVM/QEMU + libvirt (`dnf install @virtualization`) |
-| Guest OS | Rocky Linux 9 Minimal |
-| Ansible | Installed in an isolated `.venv` |
+| # | Play | Hosts | What it does |
+|---|---|---|---|
+| 1 | Configure DNS & DHCP | `dns_dhcp_servers` | Deploys BIND zones and dhcpd reservations |
+| 2 | Kubernetes base | `k8s_master:k8s_workers` | kernel modules, swap off, containerd, kubelet/kubeadm/kubectl |
+| 3 | Control plane init | `k8s_master` | `kubeadm init`, kubeconfig, Flannel CNI, join token |
+| 4 | Worker join | `k8s_workers` | `kubeadm join` using token from play 3 |
+| 5 | Bastion kubectl | `dns_dhcp_servers` | installs kubectl + kubeconfig on ns1 |
 
 ---
 
-## Step-by-Step Setup
+## Quick Start
 
-### 1. Install Ansible in a Virtual Environment (Fedora)
-
-The `.venv` is created one level above the repository directory to keep it separate from project files:
+### Prerequisites
 
 ```bash
-cd ~/University/InfraIII/lab1-ansible-dns-dhcp   # parent directory
+# Fedora host — install virtualization stack
+sudo dnf install @virtualization virt-manager
 
+# Python venv for Ansible (created one level above the repo)
+cd ~/University/InfraIII/lab1
 python3 -m venv .venv
 source .venv/bin/activate
-
-pip install --upgrade pip
 pip install ansible ansible-lint
-
-# Required collections
 ansible-galaxy collection install ansible.posix community.general
-
-ansible --version
 ```
 
-To activate the virtual environment in each new session:
+### VM Setup (one-time)
 
 ```bash
-source ~/University/InfraIII/lab1-ansible-dns-dhcp/.venv/bin/activate
-```
+# Clone base image for each node
+sudo virsh shutdown rocky9-base
+sudo virt-clone --original rocky9-base --name k8s-master --auto-clone
+sudo virt-clone --original rocky9-base --name k8s-worker  --auto-clone
 
-> The actual repository lives in the subdirectory `lab1-ansible-dns-dhcp/lab1-ansible-dns-dhcp/`.  
-> All `ansible-playbook` commands must be run from within that subdirectory.
+# Get real MAC addresses and update group_vars/all.yml dhcp_reservations
+sudo virsh domiflist k8s-master
+sudo virsh domiflist k8s-worker
 
----
-
-### 2. Create an Isolated NAT Network in KVM
-
-Define a `lab-net` network (`192.168.50.0/24`) **without** libvirt's built-in DHCP, as it will be managed by the `dhcpd` role:
-
-```bash
-cat > /tmp/lab-net.xml <<'XMLEOF'
-<network>
-  <n>lab-net</n>
-  <forward mode="nat"/>
-  <bridge name="virbr50" stp="on" delay="0"/>
-  <ip address="192.168.50.1" netmask="255.255.255.0"/>
-</network>
-XMLEOF
-
-virsh net-define /tmp/lab-net.xml
-virsh net-autostart lab-net
-virsh net-start lab-net
-virsh net-list --all     # expected output: lab-net  active  yes
-```
-
----
-
-### 3. Install the Base VM (Rocky 9 Minimal)
-
-**ISO location:** `~/University/InfraIII/VM-ISO/Rocky-9-minimal*.iso`
-
-In **virt-manager**: new VM → local ISO → 2048 MB RAM, 2 vCPUs, 20 GB disk, network `lab-net`.
-
-**During Anaconda installation:**
-- Software selection: Minimal Install
-- Network: enable the interface with a provisional static IP `192.168.50.50/24`, gateway `192.168.50.1`
-  > Note: Set `8.8.8.8` as a temporary DNS server during installation so `dnf` can resolve repository URLs. This can be reverted to `127.0.0.1` once BIND is operational.
-- Hostname: `rocky9-base`
-- Create user `rocky` in the `wheel` group
-
----
-
-### 4. Prepare the Base VM for Ansible
-
-Inside the VM (via virt-manager console or provisional SSH):
-
-```bash
-sudo dnf update -y
-sudo dnf install -y python3 openssh-server
-sudo systemctl enable --now sshd
-```
-
-**Enable passwordless sudo** (required for unattended Ansible execution):
-
-```bash
-echo "rocky ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/rocky
-sudo chmod 440 /etc/sudoers.d/rocky
-```
-
-From the Fedora host, copy the SSH key:
-
-```bash
-ssh-keygen -t ed25519 -C "ansible-lab" -f ~/.ssh/ansible_lab
-ssh-copy-id -i ~/.ssh/ansible_lab.pub rocky@192.168.50.50
-```
-
-> The private key path is already configured in `ansible.cfg` as `private_key_file=~/.ssh/ansible_lab`.
-
----
-
-### 5. Clone the Base VM
-
-```bash
-virsh shutdown rocky9-base
-
-virt-clone --original rocky9-base --name dns-dhcp-server --auto-clone
-virt-clone --original rocky9-base --name client01         --auto-clone
-```
-
-**Set a static IP on the server VM** (inside `dns-dhcp-server`):
-
-```bash
-virsh start dns-dhcp-server
-# Access via virt-manager console
-
-ip a     # identify the interface name, e.g. enp1s0
-
-sudo nmcli con mod enp1s0 \
-  ipv4.method manual \
-  ipv4.addresses 192.168.50.10/24 \
-  ipv4.gateway   192.168.50.1 \
-  ipv4.dns       8.8.8.8 \
-  connection.autoconnect yes
-sudo nmcli con up enp1s0
-sudo hostnamectl set-hostname ns1.jmelol.lab
-```
-
-Copy the SSH key to the server's definitive IP (from Fedora):
-
-```bash
+# Copy SSH key to all nodes
 ssh-copy-id -i ~/.ssh/ansible_lab.pub rocky@192.168.50.10
+ssh-copy-id -i ~/.ssh/ansible_lab.pub rocky@192.168.50.20
+ssh-copy-id -i ~/.ssh/ansible_lab.pub rocky@192.168.50.21
 ```
 
-> The interface name in this lab is `enp1s0`, which is set in `group_vars/all.yml` under `dhcp_interface`.  
-> Once BIND is running, change the VM's DNS setting to `127.0.0.1`.
-
-**Client VM** — configure for automatic DHCP:
+### Run
 
 ```bash
-sudo nmcli con mod enp1s0 ipv4.method auto
-sudo hostnamectl set-hostname client01.jmelol.lab
+cd ~/University/InfraIII/lab1/lab1-ansible-dns-dhcp
+source ../.venv/bin/activate
+
+ansible all -m ping                        # verify connectivity
+ansible-playbook site.yml                  # deploy everything
 ```
 
-If the cloned VM retains a static IP from the base image, remove it:
-
-```bash
-sudo nmcli con mod enp1s0 ipv4.addresses "" ipv4.gateway ""
-sudo nmcli con up enp1s0
-```
+Expected first-run result: **~38 tasks on master, ~28 on worker, 0 failed.**  
+Subsequent runs are fully idempotent (0 changes on stable state).
 
 ---
 
-### 6. Retrieve MAC Addresses and Update DHCP Reservations
+## Key Variables (`group_vars/all.yml`)
 
-```bash
-# From Fedora
-virsh domiflist dns-dhcp-server
-virsh domiflist client01
-```
-
-Edit `group_vars/all.yml` under `dhcp_reservations` with each VM's actual MAC address.  
-The `master` and `worker` nodes are commented out until their VMs are created:
-
-```yaml
-dhcp_reservations:
-#  - hostname: "master"
-#    mac:  "52:54:00:AA:BB:20"
-#    ip:   "192.168.50.20"
-#  - hostname: "worker"
-#    mac:  "52:54:00:AA:BB:21"
-#    ip:   "192.168.50.21"
-  - hostname: "client01"
-    mac:  "52:54:00:2a:6a:bd"    # real MAC obtained via virsh domiflist
-    ip:   "192.168.50.100"
-```
+| Variable | Default | Description |
+|---|---|---|
+| `lab_domain` | `jmelol.lab` | DNS zone name |
+| `lab_network` | `192.168.50.0` | Lab subnet |
+| `dns_server_ip` | `192.168.50.10` | ns1 static IP |
+| `k8s_master_ip` | `192.168.50.20` | Control plane advertise address |
+| `k8s_pod_cidr` | `10.244.0.0/16` | Flannel pod network CIDR |
+| `k8s_version_major_minor` | `1.32` | Kubernetes repo version |
+| `dhcp_range_start` | `192.168.50.150` | Dynamic pool start (above reservations) |
 
 ---
 
-### 7. Run the Playbook
+## Verification
 
 ```bash
-cd ~/University/InfraIII/lab1-ansible-dns-dhcp/lab1-ansible-dns-dhcp
-source ../../.venv/bin/activate
+# From ns1 (bastion)
+ssh -i ~/.ssh/ansible_lab rocky@192.168.50.10
 
-# Verify connectivity
-ansible all -m ping
+kubectl get nodes -o wide
+kubectl get pods -n kube-system -o wide
+kubectl get pods -n kube-flannel -o wide
 
-# Dry run
-ansible-playbook site.yml --check --diff
-
-# Apply
-ansible-playbook site.yml
-```
-
-Expected result on first run: **22 tasks executed, approximately 14 changes applied**.  
-Subsequent runs should be fully idempotent (0 changes).
-
----
-
-## Network Topology
-
-```
-192.168.50.0/24  (lab-net / KVM NAT)
-|
-|-- 192.168.50.1    virbr50 — KVM gateway (libvirt)
-|-- 192.168.50.10   ns1.jmelol.lab     <- DNS + DHCP server  [active]
-|-- 192.168.50.20   master.jmelol.lab  <- future k8s master  [pending]
-|-- 192.168.50.21   worker.jmelol.lab  <- future k8s worker  [pending]
-`-- 192.168.50.100-200  dynamic DHCP pool
-        `-- .100  client01 (fixed reservation by MAC)
-```
-
----
-
-## Verification Checklist
-
-### From the Fedora host
-
-```bash
-# Static analysis
-ansible-lint site.yml
-
-# Check mode (no changes applied)
-ansible-playbook site.yml --check --diff
-
-# Connectivity test
-ansible all -m ping
-```
-
-### From the server (192.168.50.10)
-
-```bash
-# Service status
-sudo systemctl status named dhcpd
-
-# Validate named.conf
-sudo named-checkconf /etc/named.conf
-
-# Validate forward zone
-sudo named-checkzone jmelol.lab /var/named/jmelol.lab.zone
-
-# Validate reverse zone
-sudo named-checkzone 50.168.192.in-addr.arpa /var/named/50.168.192.in-addr.arpa.zone
-
-# Validate dhcpd.conf
-sudo dhcpd -t -cf /etc/dhcp/dhcpd.conf
-
-# Open ports
-sudo ss -ulnp | grep -E '53|67'
-sudo firewall-cmd --list-services
-
-# DNS resolution tests
-dig @192.168.50.10 ns1.jmelol.lab
-dig @192.168.50.10 client01.jmelol.lab
-dig @192.168.50.10 -x 192.168.50.100
-
-# Active DHCP leases
-sudo cat /var/lib/dhcpd/dhcpd.leases
+# Quick smoke test
+kubectl create deployment nginx-test --image=nginx --replicas=2
+kubectl expose deployment nginx-test --type=NodePort --port=80
+kubectl get svc nginx-test          # note the NodePort (3XXXX)
+curl http://192.168.50.21:3XXXX     # should return nginx welcome page
+kubectl delete deployment nginx-test && kubectl delete svc nginx-test
 ```
 
 ---
@@ -311,90 +180,79 @@ sudo cat /var/lib/dhcpd/dhcpd.leases
 ## Issues Encountered and Resolutions
 
 ### SSH Permission Denied
-The public key was installed on the provisional IP (`.50`) but not on the server's final IP (`.10`) after reconfiguration.  
-**Resolution:** Re-run `ssh-copy-id` targeting `192.168.50.10`.
+Key was installed on the provisional IP (`.50`) but not on the final IP (`.10`) after reconfiguration.  
+**Resolution:** Re-run `ssh-copy-id` targeting the definitive IP.
 
-### Privilege Escalation Failure (Missing sudo password)
-Ansible required an interactive sudo password, which is incompatible with unattended automation.  
-**Resolution:** Create `/etc/sudoers.d/rocky` with `NOPASSWD:ALL` on the VM (see step 4).
+### Privilege Escalation Failure
+Ansible required an interactive sudo password, incompatible with unattended automation.  
+**Resolution:** Create `/etc/sudoers.d/rocky` with `NOPASSWD:ALL` on each VM.
 
 ### Deprecated Output Plugin (`community.general.yaml`)
-Newer versions of `ansible-core` do not support this external callback plugin, causing the playbook to fail at startup.  
-**Resolution applied in `ansible.cfg`:**
+Newer `ansible-core` versions dropped this external callback.  
+**Resolution in `ansible.cfg`:**
 ```ini
 stdout_callback = ansible.builtin.default
-
 [callback_default]
 result_format = yaml
 ```
 
 ### Invalid Jinja2 Filter (`.ljust()`)
-The `.ljust()` method is a Python string method and not a valid Jinja2 filter, causing template rendering to fail.  
-**Resolution in `zone.forward.j2` and `zone.reverse.j2`:**
+Python string method not valid in Jinja2 templates.  
+**Resolution:**
 ```jinja2
-# Before
-{{ record.name | ljust(16) }}
-# After
 {{ "%-16s" | format(record.name) }}
 ```
 
-### BIND Package Installation Failure (DNS Bootstrap)
-The server VM had `127.0.0.1` configured as its DNS resolver, but BIND was not yet installed, preventing `dnf` from resolving repository hostnames.  
-**Resolution:** Configure `8.8.8.8` as a temporary DNS resolver on the VM before running the playbook. Revert to `127.0.0.1` once `named` is active.
-
-### Incorrect `bind_service` Variable Value
-An erroneous default value caused systemd to attempt managing a non-existent service unit.  
-**Resolution:** Set `bind_service: "named"` in `roles/dns_bind/defaults/main.yml`.
+### BIND Bootstrap DNS Loop
+Server had `127.0.0.1` as DNS but BIND was not yet installed — `dnf` could not resolve repos.  
+**Resolution:** Set `8.8.8.8` temporarily during first playbook run; revert to `127.0.0.1` after named is active.
 
 ### Client VM Retained Static IP After Cloning
-The cloned VM inherited the static network configuration from the base image, resulting in two simultaneous IP addresses on the same interface.  
+Cloned VM inherited static config from base image, causing duplicate IPs.  
 **Resolution:**
 ```bash
 sudo nmcli con mod enp1s0 ipv4.addresses "" ipv4.gateway ""
 sudo nmcli con up enp1s0
 ```
 
-### Client Received Reserved IP Regardless of MAC Address
-The dynamic DHCP pool started at `.100`, which was also the fixed reservation for `client01`. When tested with a different MAC, the server assigned `.100` from the dynamic pool rather than matching the reservation.  
-**Lesson learned:** Do not overlap reservation IPs with the start of the dynamic range. Consider starting the dynamic pool at `.150` or higher to maintain a clear boundary.
+### DHCP Pool Overlap with Reservations
+Dynamic range started at `.100`, same as the `client01` fixed reservation.  
+**Resolution:** Moved `dhcp_range_start` to `192.168.50.150`.
+
+### containerd CRI Socket Unimplemented
+`kubeadm init` failed with `unknown service runtime.v1.RuntimeService` because containerd config had stale defaults.  
+**Resolution:** Always regenerate `config.toml` (removed `creates:` guard) and restart containerd explicitly with `wait_for` on the socket before continuing.
+
+### SELinux Module Missing `python3-libselinux`
+`ansible.posix.selinux` requires the SELinux Python bindings not present on Rocky 9 minimal.  
+**Resolution:** Replaced the module with direct `getenforce`/`setenforce 0` shell commands.
+
+### Master DNS Resolving via 8.8.8.8
+`kubeadm init` preflight failed: `lookup master.jmelol.lab on 8.8.8.8:53: no such host`.  
+**Resolution:** Added `nmcli con mod` task in `k8s_base` to point each k8s node's DNS to `192.168.50.10` before init runs.
+
+### kubeadm Partial State After Failed Init
+Re-running `kubeadm init` on a node with leftover state from a failed attempt caused errors.  
+**Resolution:** Added `kubeadm reset --force` (with `failed_when: false`) before init when `admin.conf` does not exist.
+
+### kubectl Bastion Role Did Not Execute
+The bastion play ran but only gathered facts — `hostvars` fact from master was empty on re-runs.  
+**Resolution:** Replaced in-memory `hostvars` transfer with `fetch` (master → Fedora host) + `copy` (Fedora host → ns1), making the role independent of play execution order.
 
 ---
 
 ## SELinux Notes
 
-Rocky 9 runs SELinux in `enforcing` mode by default. The expected security contexts are:
+Rocky 9 runs SELinux in `enforcing` by default. Kubernetes nodes are set to `permissive` by the playbook. Expected security contexts on ns1:
 
-| Resource | Expected context |
+| Resource | Context |
 |---|---|
 | `/etc/named.conf` | `system_u:object_r:named_conf_t:s0` |
 | `/var/named/*.zone` | `system_u:object_r:named_zone_t:s0` |
 | `/etc/dhcp/dhcpd.conf` | `system_u:object_r:dhcp_etc_t:s0` |
 
-To investigate AVC denials:
 ```bash
 sudo ausearch -m avc -ts recent | audit2why
 ```
 
 ---
-
-## DHCP Interface Configuration
-
-`dhcpd` requires an explicit interface name for its listener. The role writes this value to `/etc/sysconfig/dhcpd` as `DHCPDARGS="<interface>"`.
-
-- **Value used in this lab:** `dhcp_interface: "enp1s0"` (set explicitly in `group_vars/all.yml`)
-- If set to `auto`, the role reads `ansible_default_ipv4.interface` from Ansible facts, which may be unreliable on multi-interface hosts.
-- **Recommendation:** always define the interface name explicitly. Verify the correct name with `ip -br a` inside the VM.
-
----
-
-## Roadmap — Kubernetes
-
-DNS records and DHCP reservations for the Kubernetes nodes are already defined in the variables.
-
-| Task | Status |
-|---|---|
-| Create `master` VM by cloning `rocky9-base` | Pending |
-| Create `worker` VM by cloning `rocky9-base` | Pending |
-| Retrieve MACs and uncomment entries in `dhcp_reservations` | Pending |
-| Uncomment `[k8s_master]` / `[k8s_workers]` in `inventory/hosts.ini` | Pending |
-| Develop `k8s_base` role and add corresponding play in `site.yml` | Pending |

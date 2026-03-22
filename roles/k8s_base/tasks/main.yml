@@ -1,0 +1,181 @@
+---
+# ============================================================
+#  Rol: k8s_base — prepara cualquier nodo para Kubernetes
+#  (master y workers por igual)
+# ============================================================
+
+# ---------- 1. Módulos del kernel ----------
+- name: Crear /etc/modules-load.d/k8s.conf
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/k8s.conf
+    content: |
+      overlay
+      br_netfilter
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Cargar módulos en sesión actual
+  community.general.modprobe:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - overlay
+    - br_netfilter
+
+# ---------- 2. Parámetros sysctl ----------
+- name: Configurar sysctl para Kubernetes
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    state: present
+    reload: true
+    sysctl_file: /etc/sysctl.d/99-k8s.conf
+  loop:
+    - { key: "net.bridge.bridge-nf-call-iptables",  value: "1" }
+    - { key: "net.bridge.bridge-nf-call-ip6tables", value: "1" }
+    - { key: "net.ipv4.ip_forward",                 value: "1" }
+
+# ---------- 3. Deshabilitar swap (requisito de k8s) ----------
+- name: Verificar si swap está activo
+  ansible.builtin.command:
+    cmd: swapon --show
+  register: swap_status
+  changed_when: false
+  failed_when: false
+
+- name: Desactivar swap en sesión actual
+  ansible.builtin.command:
+    cmd: swapoff -a
+  when: swap_status.stdout != ""
+  changed_when: true
+
+- name: Eliminar swap de /etc/fstab (persistente)
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: '^([^#].*\s+swap\s+.*)$'
+    replace: '# \1'
+
+# ---------- 4. Repo de containerd (Docker CE) ----------
+- name: Instalar dnf-plugins-core
+  ansible.builtin.package:
+    name: dnf-plugins-core
+    state: present
+
+- name: Agregar repo Docker CE (contiene containerd.io)
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/centos/docker-ce.repo
+    dest: /etc/yum.repos.d/docker-ce.repo
+    mode: "0644"
+
+# ---------- 5. Instalar containerd ----------
+- name: Instalar containerd.io
+  ansible.builtin.package:
+    name: "{{ containerd_packages }}"
+    state: present
+
+- name: Crear directorio de configuración de containerd
+  ansible.builtin.file:
+    path: /etc/containerd
+    state: directory
+    mode: "0755"
+
+# Siempre regeneramos el config (sin creates:) para garantizar estado limpio
+- name: Generar configuración por defecto de containerd
+  ansible.builtin.shell:
+    cmd: containerd config default > /etc/containerd/config.toml
+  changed_when: true
+
+- name: Habilitar SystemdCgroup en containerd
+  ansible.builtin.replace:
+    path: /etc/containerd/config.toml
+    regexp: 'SystemdCgroup = false'
+    replace: 'SystemdCgroup = true'
+
+# Reinicio explícito e inmediato (NO via handler) para que el socket CRI
+# esté operativo antes de que kubeadm intente conectarse.
+- name: Habilitar y reiniciar containerd con config actualizada
+  ansible.builtin.service:
+    name: containerd
+    enabled: true
+    state: restarted
+
+- name: Esperar a que el socket de containerd esté listo
+  ansible.builtin.wait_for:
+    path: /run/containerd/containerd.sock
+    state: present
+    timeout: 30
+
+# ---------- 6. DNS — apuntar al servidor ns1 del lab ----------
+# Sin esto kubeadm falla al verificar el hostname (resuelve con 8.8.8.8
+# y no encuentra master.jmelol.lab ni worker.jmelol.lab)
+- name: Configurar DNS hacia ns1 del lab (192.168.50.10)
+  ansible.builtin.command:
+    cmd: >
+      nmcli con mod "{{ ansible_default_ipv4.alias }}"
+      ipv4.dns "192.168.50.10"
+      ipv4.ignore-auto-dns yes
+  changed_when: true
+
+- name: Aplicar cambio de DNS (recargar conexión)
+  ansible.builtin.command:
+    cmd: nmcli con up "{{ ansible_default_ipv4.alias }}"
+  changed_when: true
+
+# ---------- 7. Repo de Kubernetes ----------
+- name: Agregar repo de Kubernetes {{ k8s_version_major_minor }}
+  ansible.builtin.copy:
+    dest: /etc/yum.repos.d/kubernetes.repo
+    content: |
+      [kubernetes]
+      name=Kubernetes
+      baseurl=https://pkgs.k8s.io/core:/stable:/v{{ k8s_version_major_minor }}/rpm/
+      enabled=1
+      gpgcheck=1
+      gpgkey=https://pkgs.k8s.io/core:/stable:/v{{ k8s_version_major_minor }}/rpm/repodata/repomd.xml.key
+      exclude=kubelet kubeadm kubectl cri-tools kubernetes-cni
+    owner: root
+    group: root
+    mode: "0644"
+
+# ---------- 8. Instalar kubelet, kubeadm, kubectl ----------
+- name: Instalar paquetes de Kubernetes
+  ansible.builtin.dnf:
+    name: "{{ k8s_packages }}"
+    state: present
+    disable_excludes: kubernetes
+
+- name: Habilitar kubelet (kubeadm lo arrancará)
+  ansible.builtin.service:
+    name: kubelet
+    enabled: true
+
+# ---------- 9. SELinux — modo permisivo para k8s ----------
+# Usamos comandos directos para evitar depender de python3-libselinux
+- name: Verificar modo SELinux actual
+  ansible.builtin.command:
+    cmd: getenforce
+  register: selinux_mode
+  changed_when: false
+
+- name: Poner SELinux en permissive en sesión actual
+  ansible.builtin.command:
+    cmd: setenforce 0
+  when: selinux_mode.stdout == "Enforcing"
+  changed_when: true
+
+- name: Hacer SELinux permissive persistente en /etc/selinux/config
+  ansible.builtin.replace:
+    path: /etc/selinux/config
+    regexp: '^SELINUX=enforcing'
+    replace: 'SELINUX=permissive'
+
+# ---------- 10. Firewall ----------
+- name: Abrir puertos comunes a todos los nodos k8s (kubelet)
+  ansible.posix.firewalld:
+    port: "{{ item }}"
+    permanent: true
+    state: enabled
+    immediate: true
+  loop:
+    - "10250/tcp"   # kubelet API

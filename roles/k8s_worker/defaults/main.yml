@@ -1,0 +1,7 @@
+---
+# ============================================================
+#  Rol: k8s_worker — defaults
+# ============================================================
+
+# Nombre del grupo del master en el inventario
+k8s_master_group: "k8s_master"

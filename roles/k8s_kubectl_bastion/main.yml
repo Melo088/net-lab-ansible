@@ -1,0 +1,125 @@
+---
+# ============================================================
+#  Rol: k8s_kubectl_bastion — instala kubectl en ns1 (bastion)
+#  y copia el kubeconfig del master para gestionar el cluster
+# ============================================================
+
+# ---------- 1. Repo de Kubernetes en el bastion ----------
+- name: Agregar repo de Kubernetes en bastion
+  ansible.builtin.copy:
+    dest: /etc/yum.repos.d/kubernetes.repo
+    content: |
+      [kubernetes]
+      name=Kubernetes
+      baseurl=https://pkgs.k8s.io/core:/stable:/v{{ k8s_version_major_minor }}/rpm/
+      enabled=1
+      gpgcheck=1
+      gpgkey=https://pkgs.k8s.io/core:/stable:/v{{ k8s_version_major_minor }}/rpm/repodata/repomd.xml.key
+      exclude=kubelet kubeadm kubectl cri-tools kubernetes-cni
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Instalar kubectl en bastion
+  ansible.builtin.dnf:
+    name: kubectl
+    state: present
+    disable_excludes: kubernetes
+
+# ---------- 2. Instalar kubeconfig del master ----------
+- name: Crear directorio .kube para el usuario rocky en bastion
+  ansible.builtin.file:
+    path: /home/rocky/.kube
+    state: directory
+    owner: rocky
+    group: rocky
+    mode: "0755"
+
+- name: Escribir kubeconfig del master en el bastion
+  ansible.builtin.copy:
+    content: >-
+      {{
+        hostvars[
+          groups['k8s_master'][0]
+        ]['master_kubeconfig_content']
+      }}
+    dest: /home/rocky/.kube/config
+    owner: rocky
+    group: rocky
+    mode: "0600"
+
+- name: Verificar conectividad al cluster desde el bastion
+  ansible.builtin.command:
+    cmd: kubectl get nodes
+  environment:
+    KUBECONFIG: /home/rocky/.kube/config
+  register: kubectl_nodes---
+# ============================================================
+#  Rol: k8s_kubectl_bastion — instala kubectl en ns1 (bastion)
+#  y copia el kubeconfig del master para gestionar el cluster
+# ============================================================
+
+# ---------- 1. Repo de Kubernetes en el bastion ----------
+- name: Agregar repo de Kubernetes en bastion
+  ansible.builtin.copy:
+    dest: /etc/yum.repos.d/kubernetes.repo
+    content: |
+      [kubernetes]
+      name=Kubernetes
+      baseurl=https://pkgs.k8s.io/core:/stable:/v{{ k8s_version_major_minor }}/rpm/
+      enabled=1
+      gpgcheck=1
+      gpgkey=https://pkgs.k8s.io/core:/stable:/v{{ k8s_version_major_minor }}/rpm/repodata/repomd.xml.key
+      exclude=kubelet kubeadm kubectl cri-tools kubernetes-cni
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Instalar kubectl en bastion
+  ansible.builtin.dnf:
+    name: kubectl
+    state: present
+    disable_excludes: kubernetes
+
+# ---------- 2. Instalar kubeconfig del master ----------
+- name: Crear directorio .kube para el usuario rocky en bastion
+  ansible.builtin.file:
+    path: /home/rocky/.kube
+    state: directory
+    owner: rocky
+    group: rocky
+    mode: "0755"
+
+- name: Escribir kubeconfig del master en el bastion
+  ansible.builtin.copy:
+    content: >-
+      {{
+        hostvars[
+          groups['k8s_master'][0]
+        ]['master_kubeconfig_content']
+      }}
+    dest: /home/rocky/.kube/config
+    owner: rocky
+    group: rocky
+    mode: "0600"
+
+- name: Verificar conectividad al cluster desde el bastion
+  ansible.builtin.command:
+    cmd: kubectl get nodes
+  environment:
+    KUBECONFIG: /home/rocky/.kube/config
+  register: kubectl_nodes
+  changed_when: false
+  failed_when: false
+  become: false
+
+- name: Mostrar nodos del cluster
+  ansible.builtin.debug:
+    msg: "{{ kubectl_nodes.stdout_lines }}"
+  changed_when: false
+  failed_when: false
+  become: false
+
+- name: Mostrar nodos del cluster
+  ansible.builtin.debug:
+    msg: "{{ kubectl_nodes.stdout_lines }}"

@@ -1,0 +1,45 @@
+---
+# ============================================================
+#  Rol: k8s_worker — une el nodo al cluster
+# ============================================================
+
+# ---------- 1. Firewall del worker ----------
+- name: Abrir puertos del worker
+  ansible.posix.firewalld:
+    port: "{{ item }}"
+    permanent: true
+    state: enabled
+    immediate: true
+  loop:
+    - "10250/tcp"        # kubelet
+    - "10256/tcp"        # kube-proxy
+    - "30000-32767/tcp"  # NodePort TCP
+    - "30000-32767/udp"  # NodePort UDP
+
+# ---------- 2. Verificar si ya está en el cluster ----------
+- name: Verificar si el worker ya está unido al cluster
+  ansible.builtin.stat:
+    path: /etc/kubernetes/kubelet.conf
+  register: worker_joined
+
+# ---------- 3. Ejecutar join ----------
+- name: Obtener join command desde el master
+  ansible.builtin.set_fact:
+    join_cmd: >-
+      {{
+        hostvars[
+          groups[k8s_master_group][0]
+        ]['k8s_join_command']
+      }}
+
+- name: Unir worker al cluster
+  ansible.builtin.command:
+    cmd: "{{ join_cmd }}"
+  when: not worker_joined.stat.exists
+  changed_when: true
+  register: join_result
+
+- name: Mostrar resultado del join
+  ansible.builtin.debug:
+    msg: "{{ join_result.stdout_lines }}"
+  when: not worker_joined.stat.exists and join_result is defined

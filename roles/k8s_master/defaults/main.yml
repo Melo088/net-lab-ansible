@@ -1,0 +1,14 @@
+---
+# ============================================================
+#  Rol: k8s_master — defaults
+# ============================================================
+
+# IP del nodo master (coincidir con group_vars)
+k8s_master_ip: "192.168.50.20"
+
+# Directorio de configuración kubectl para el usuario rocky
+k8s_kubeconfig_user: "rocky"
+k8s_kubeconfig_dir:  "/home/rocky/.kube"
+
+# Manifest de Flannel CNI
+k8s_flannel_manifest: "https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml"

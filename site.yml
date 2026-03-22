@@ -2,6 +2,8 @@
 # ============================================================
 #  site.yml — Playbook principal del laboratorio
 # ============================================================
+
+# ----- Play 1: DNS y DHCP (existente) -----
 - name: Configurar servidor DNS y DHCP
   hosts: dns_dhcp_servers
   gather_facts: true
@@ -9,8 +11,30 @@
     - dns_bind
     - dhcpd
 
-# agregar aquí futuros plays para k8s_master / k8s_workers
-# - name: Preparar nodos Kubernetes
-#   hosts: k8s_master:k8s_workers
-#   roles:
-#     - k8s_base
+# ----- Play 2: Base de Kubernetes (master y workers) -----
+- name: Preparar nodos Kubernetes (base común)
+  hosts: k8s_master:k8s_workers
+  gather_facts: true
+  roles:
+    - k8s_base
+
+# ----- Play 3: Inicializar control plane -----
+- name: Inicializar control plane en master
+  hosts: k8s_master
+  gather_facts: true
+  roles:
+    - k8s_master
+
+# ----- Play 4: Unir workers al cluster -----
+- name: Unir workers al cluster
+  hosts: k8s_workers
+  gather_facts: true
+  roles:
+    - k8s_worker
+
+# ----- Play 5: kubectl en el bastion (ns1) -----
+- name: Instalar kubectl y kubeconfig en el bastion
+  hosts: dns_dhcp_servers
+  gather_facts: true
+  roles:
+    - k8s_kubectl_bastion

@@ -62,18 +62,24 @@ dhcp_domain_servers:
 dhcp_default_lease:  43200   # 12 h
 dhcp_max_lease:      86400   # 24 h
 
-dhcp_range_start: "192.168.50.100"
+dhcp_range_start: "192.168.50.150"
 dhcp_range_end:   "192.168.50.200"
 
 # Reservas por MAC para nodos Kubernetes y cliente fijo
 
 dhcp_reservations:
-#  - hostname: "master"
-#    mac:  "52:54:00:AA:BB:20"
-#    ip:   "192.168.50.20"
-#  - hostname: "worker"
-#    mac:  "52:54:00:AA:BB:21"
-#    ip:   "192.168.50.21"
+  - hostname: "master"
+    mac:  "52:54:00:4e:8a:b7"
+    ip:   "192.168.50.20"
+  - hostname: "worker"
+    mac:  "52:54:00:0d:1e:2d"
+    ip:   "192.168.50.21"
   - hostname: "client01"
     mac:  "52:54:00:2a:6a:bd"
     ip:   "192.168.50.100"
+
+# ----- Kubernetes -----
+k8s_version_major_minor: "1.32"
+k8s_pod_cidr:            "10.244.0.0/16"   # Flannel
+k8s_cri_socket:          "unix:///run/containerd/containerd.sock"
+k8s_master_ip:           "192.168.50.20"
