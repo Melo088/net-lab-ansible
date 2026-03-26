@@ -122,3 +122,15 @@
 - name: Guardar kubeconfig como fact compartido
   ansible.builtin.set_fact:
     master_kubeconfig_content: "{{ master_kubeconfig_b64.content | b64decode }}"
+
+# ---------- 10. Asegurar pods para el worker ----------
+
+- name: Asegurar que el worker pueda recibir pods (Uncordon)
+  ansible.builtin.command:
+    cmd: "kubectl uncordon {{ item }}"
+  loop: "{{ groups['k8s_workers'] }}"
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  register: uncordon_out
+  changed_when: "'uncordoned' in uncordon_out.stdout"
+  failed_when: false

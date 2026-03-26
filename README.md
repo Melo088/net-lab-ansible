@@ -266,6 +266,15 @@ Re-running `kubeadm init` on a node with leftover state from a failed attempt ca
 The bastion play ran but only gathered facts — `hostvars` fact from master was empty on re-runs.  
 **Resolution:** Replaced in-memory `hostvars` transfer with `fetch` (master → Fedora host) + `copy` (Fedora host → ns1), making the role independent of play execution order.
 
+### Flannel Networking Timeouts (DNS Failure)
+Pods acrosss different nodes could not reach CoreDNS (timeout).
+**Resolution:** Added `firewalld` rules to allow the `10.244.0.0/16` source, opened port `8472/udp` for VXLAN encapsulation, and enabled `masquerade` on all nodes.
+
+### Flannel Networking Timeouts (DNS Failure)
+New worker nodes occasionally joined the cluster in a cordoned state.
+**Resolution:**Added an automated `kubectl uncordon` task in the master role to ensure all nodes are ready to receive workloads immediately after joining.
+
+
 ---
 
 ## SELinux Notes
@@ -307,7 +316,7 @@ Applied to both `master` and `worker` in parallel, this phase conditions the Roc
 - **SELinux:** Set to `permissive` mode using direct shell commands (`setenforce 0` + `sed` on `/etc/selinux/config`) because `ansible.posix.selinux` requires `python3-libselinux`, which is absent on the minimal image.
 - **Kernel modules:** `overlay` and `br_netfilter` are loaded and persisted via `/etc/modules-load.d/k8s.conf`.
 - **sysctl:** `net.bridge.bridge-nf-call-iptables`, `net.bridge.bridge-nf-call-ip6tables`, and `net.ipv4.ip_forward` are all set to `1` and written to `/etc/sysctl.d/k8s.conf`.
-- **Firewall:** `firewalld` is configured with the ports required by the control plane (6443, 2379–2380, 10250–10252) and worker (10250, 30000–32767), as well as Flannel's VXLAN port (8472/udp).
+- **Firewall:** `firewalld` is configured with the ports required by the control plane (6443, 2379–2380, 10250–10252) and worker (10250, 30000–32767), as well as Flannel's VXLAN port (8472/udp) plus IP masquerading for pod-to-external communication.
 - **containerd:** Installed from the Docker CE repository. The default `config.toml` is always regenerated (no `creates:` guard) to ensure `SystemdCgroup = true` is active and the CRI socket is available before `kubeadm` runs.
 - **Kubernetes tooling:** `kubelet`, `kubeadm`, and `kubectl` are installed from the official `pkgs.k8s.io` repository pinned to version `1.32`.
 

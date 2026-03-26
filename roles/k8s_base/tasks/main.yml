@@ -170,8 +170,8 @@
     regexp: '^SELINUX=enforcing'
     replace: 'SELINUX=permissive'
 
-# ---------- 10. Firewall ----------
-- name: Abrir puertos comunes a todos los nodos k8s (kubelet)
+# ---------- 10. Firewall para Networking ----------
+- name: Abrir puertos comunes (kubelet)
   ansible.posix.firewalld:
     port: "{{ item }}"
     permanent: true
@@ -179,3 +179,27 @@
     immediate: true
   loop:
     - "10250/tcp"   # kubelet API
+    - "8472/udp"    # VXLAN para Flannel
+
+- name: Permitir tráfico desde la red de Pods (Flannel)
+  ansible.posix.firewalld:
+    source: "{{ k8s_pod_cidr }}"
+    zone: public
+    permanent: true
+    state: enabled
+    immediate: true
+
+- name: Habilitar Masquerade (Permite que los Pods salgan a la red)
+  ansible.posix.firewalld:
+    masquerade: true
+    state: enabled
+    permanent: true
+    immediate: true
+
+# ---------- 11. Resolución Local----------
+- name: Asegurar que los nodos se resuelven por IP privada en /etc/hosts
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    # Esto agrega: "192.168.50.20 master.jmelol.lab master"
+    line: "{{ ansible_default_ipv4.address }} {{ inventory_hostname }}.jmelol.lab {{ inventory_hostname }}"
+    state: present
