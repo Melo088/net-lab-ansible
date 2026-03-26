@@ -5,6 +5,35 @@ Idempotent Ansible playbook suite to deploy a complete network infrastructure la
 
 ---
 
+## Introduction and Objectives
+
+This project documents the design, automation, and deployment of a complete network infrastructure lab built on top of KVM/QEMU virtualization running on a Fedora 43 host. The lab covers two interconnected areas: foundational network services (DNS and DHCP) and a production-grade Kubernetes cluster, both provisioned end-to-end through a single idempotent Ansible playbook suite.
+
+The work directly addresses the requirements of the practical activity *Despliegue de un Clúster de Kubernetes con kubeadm*, adapted to a KVM/libvirt environment instead of VirtualBox, and elevating the configuration management from manual steps to a fully automated, version-controlled approach.
+
+**Primary objectives:**
+
+- Design and automate the deployment of a bastion node that provides DNS (BIND9) and DHCP (ISC dhcpd) services to an isolated lab network, including MAC-based IP reservations for cluster nodes.
+- Provision a functional Kubernetes 1.32 cluster using `kubeadm` across a dedicated control-plane node and a worker node, fully automated with Ansible roles.
+- Install the Flannel CNI plugin and validate pod-to-pod networking across nodes.
+- Configure the bastion as the sole `kubectl` administration point, keeping the control plane free of direct operator access.
+- Achieve full idempotency: re-running `ansible-playbook site.yml` on a stable cluster produces zero changes and zero failures.
+- Document every obstacle encountered during implementation and the resolution applied, serving as a replicable reference for similar lab environments.
+
+---
+
+## Lab Context
+
+The activity was framed as an infrastructure-as-code exercise within the *Infraestructura III* course. The assignment required students to manually configure three virtual machines( a bastion, a Kubernetes master, and a Kubernetes worker) following a prescribed set of phases: bastion setup with network services, OS-level preparation of the Kubernetes nodes, cluster initialization, and workload validation.
+
+This implementation diverges from the reference setup in two deliberate ways. First, the hypervisor is KVM/libvirt on Fedora 43 instead of VirtualBox; this required adapting network configuration (using a libvirt NAT bridge `virbr50` instead of VirtualBox Host-Only adapters). Second, every manual step described in the assignment has been encoded as an Ansible role, making the deployment reproducible from a single command rather than a series of interactive shell sessions.
+
+The entire lab runs inside the `192.168.50.0/24` subnet managed by libvirt. The bastion (`ns1`, `.10`) provides name resolution for the `.jmelol.lab` domain and assigns fixed IPs to the cluster nodes via DHCP reservations. The master (`.20`) hosts the Kubernetes control plane and the Flannel CNI overlay. The worker (`.21`) runs application workloads and is the target for NodePort service exposure. An optional DHCP test client (`client01`, `.100`) validates dynamic lease assignment from the `.150–.200` pool.
+
+All guest VMs run **Rocky Linux 9.7 (Blue Onyx) Minimal**, cloned from a single base image to keep provisioning time low. Ansible connects over SSH using a dedicated key pair and escalates privileges via passwordless `sudo`, both configured as part of the one-time VM setup documented in the Quick Start section.
+
+---
+
 ## Architecture
 
 ```
@@ -73,8 +102,6 @@ lab1-ansible-dns-dhcp/
 │   └── k8s_kubectl_bastion/    ← kubectl + kubeconfig on ns1
 │       ├── defaults/main.yml
 │       └── tasks/main.yml
-├── startup-guide.txt           ← Lab1 (DNS/DHCP) startup & verification
-├── startup-guide-k8s.txt       ← Lab2 (Kubernetes) startup & verification
 ├── .gitignore
 ├── .github/workflows/ci.yml
 └── README.md
@@ -256,3 +283,77 @@ sudo ausearch -m avc -ts recent | audit2why
 ```
 
 ---
+
+## Configuration Phases
+
+The deployment follows four sequential phases, each corresponding to an Ansible play (or group of plays) in `site.yml`.
+
+### Phase 1 — Bastion Server Configuration (`dns_bind` + `dhcpd` roles)
+
+The bastion node `ns1` (192.168.50.10) is configured first because every subsequent phase depends on it for name resolution. This phase deploys two services:
+
+**BIND9 (named)** is installed and configured with a forward zone (`jmelol.lab`) and a reverse zone (`50.168.192.in-addr.arpa`). Zone files are generated from Jinja2 templates (`zone.forward.j2`, `zone.reverse.j2`) using the `bind_a_records` and `bind_ptr_records` lists defined in `group_vars/all.yml`. The server listens on `127.0.0.1` and `192.168.50.10`, accepts queries from localhost and the `192.168.50.0/24` subnet, and forwards external queries to `8.8.8.8` and `1.1.1.1`. SELinux file contexts (`named_conf_t`, `named_zone_t`) are preserved via `restorecon`.
+
+**ISC dhcpd** is configured to serve the `192.168.50.0/24` subnet with a dynamic pool from `.150` to `.200` and fixed-address reservations for `master` (`.20`), `worker` (`.21`), and `client01` (`.100`) matched by MAC address. Lease times are set to 12 h default / 24 h maximum. The `dhcp_interface` variable (`enp1s0`) controls which interface the daemon binds to.
+
+A critical bootstrapping concern was solved here: if `127.0.0.1` is set as the system DNS resolver before BIND is installed, `dnf` cannot resolve package repositories. The playbook temporarily uses `8.8.8.8` for package installation and switches to `127.0.0.1` only after `named` is confirmed active.
+
+### Phase 2 — Kubernetes Node Preparation (`k8s_base` role)
+
+Applied to both `master` and `worker` in parallel, this phase conditions the Rocky Linux OS to meet all Kubernetes prerequisites:
+
+- **Hostname and DNS:** Each node's hostname is set (`master.jmelol.lab`, `worker.jmelol.lab`) and its DNS resolver is pointed to `192.168.50.10` via `nmcli`, so that `kubeadm` preflight checks can resolve cluster FQDNs.
+- **Swap:** Swap is disabled immediately (`swapoff -a`) and removed from `/etc/fstab` to prevent kubelet from refusing to start.
+- **SELinux:** Set to `permissive` mode using direct shell commands (`setenforce 0` + `sed` on `/etc/selinux/config`) because `ansible.posix.selinux` requires `python3-libselinux`, which is absent on the minimal image.
+- **Kernel modules:** `overlay` and `br_netfilter` are loaded and persisted via `/etc/modules-load.d/k8s.conf`.
+- **sysctl:** `net.bridge.bridge-nf-call-iptables`, `net.bridge.bridge-nf-call-ip6tables`, and `net.ipv4.ip_forward` are all set to `1` and written to `/etc/sysctl.d/k8s.conf`.
+- **Firewall:** `firewalld` is configured with the ports required by the control plane (6443, 2379–2380, 10250–10252) and worker (10250, 30000–32767), as well as Flannel's VXLAN port (8472/udp).
+- **containerd:** Installed from the Docker CE repository. The default `config.toml` is always regenerated (no `creates:` guard) to ensure `SystemdCgroup = true` is active and the CRI socket is available before `kubeadm` runs.
+- **Kubernetes tooling:** `kubelet`, `kubeadm`, and `kubectl` are installed from the official `pkgs.k8s.io` repository pinned to version `1.32`.
+
+### Phase 3 — Cluster Initialization (`k8s_master` + `k8s_worker` roles)
+
+**Control plane (`k8s_master` role):** `kubeadm init` is invoked with `--apiserver-advertise-address=192.168.50.20` and `--pod-network-cidr=10.244.0.0/16`. A `kubeadm reset --force` step (idempotency guard) runs first when `admin.conf` is absent to clean any leftover state from previous failed attempts. After a successful init, the kubeconfig is installed for the `rocky` user and Flannel is applied with `kubectl apply -f`. The join token and CA certificate hash are extracted and stored as Ansible facts for use in the next play.
+
+**Worker join (`k8s_worker` role):** The token and hash captured from the master are passed to `kubeadm join 192.168.50.20:6443`. The task is guarded by a check on `/etc/kubernetes/kubelet.conf` to skip re-joining an already-registered node.
+
+**Bastion kubectl (`k8s_kubectl_bastion` role):** Rather than relying on in-memory `hostvars` (which are empty on playbook re-runs), the `admin.conf` file is fetched from the master to the Fedora host with `fetch`, then pushed to `ns1` with `copy`. This makes the role order-independent and safe for idempotent re-runs.
+
+### Phase 4 — Validation and Testing
+
+Once the playbook completes, the cluster state is verified from `ns1`:
+
+```bash
+kubectl get nodes -o wide
+# Expected: master and worker both in Ready state
+
+kubectl get pods -n kube-system -o wide
+kubectl get pods -n kube-flannel -o wide
+# Expected: all system pods Running, Flannel daemonset active on both nodes
+```
+
+A smoke-test deployment validates end-to-end workload scheduling and network exposure:
+
+```bash
+kubectl create deployment nginx-test --image=nginx --replicas=2
+kubectl expose deployment nginx-test --type=NodePort --port=80
+curl http://192.168.50.21:<NodePort>
+# Expected: nginx welcome page served from the worker node
+```
+
+CoreDNS internal resolution is validated by running a temporary `busybox` pod and querying a cluster service name, confirming that service discovery works correctly across the overlay network.
+
+---
+
+## Results and Conclusions
+
+The lab was completed successfully. A single run of `ansible-playbook site.yml` on a freshly cloned set of VMs produces a fully operational Kubernetes 1.32 cluster with DNS and DHCP services, without any manual intervention beyond the one-time SSH key distribution. Subsequent runs confirm complete idempotency: all tasks report `ok` or `skipped`, with zero changes and zero failures.
+
+**Observed results:**
+
+- Both `master` and `worker` reach `Ready` status after the playbook completes.
+- All `kube-system` pods (API server, controller manager, scheduler, etcd, CoreDNS) and the `kube-flannel` daemonset run in `Running` state on their respective nodes.
+- The Nginx test deployment schedules two replicas on the worker and is reachable via NodePort from the bastion, confirming that pod networking, CNI overlay (Flannel VXLAN), and kube-proxy iptables rules are all functional.
+- DHCP reservations are honoured: the master and worker always receive `.20` and `.21` respectively, and a dynamic lease from the `.150–.200` pool is correctly assigned to `client01`.
+- DNS forward and reverse resolution for all four hosts in `jmelol.lab` is confirmed from every node in the lab.
+
